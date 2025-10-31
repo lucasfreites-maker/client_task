@@ -1,4 +1,4 @@
-// client1.c (fixed timing version)
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,124 +9,274 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <sys/time.h>
+#include <sys/select.h>
 #include <time.h>
+#include <pthread.h>
+#include <signal.h>
 
 #define SERVER_ADDR "127.0.0.1"
 #define PORT1 4001
 #define PORT2 4002
 #define PORT3 4003
-#define BUF_SIZE 256
-#define PRINT_INTERVAL_MS 100
+#define BUF_SIZE 512
+#define INTERVAL_MS 100
 
-long long current_timestamp_ms() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (long long)tv.tv_sec * 1000 + (tv.tv_usec / 1000);
+static volatile int running = 1;
+
+void handle_sigint(int sig) {
+    (void)sig;
+    running = 0;
 }
 
-void set_nonblocking(int sock) {
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+long long timespec_to_ms_epoch(const struct timespec *ts) {
+    return (long long)ts->tv_sec * 1000 + ts->tv_nsec / 1000000;
+}
+
+long long timespec_to_ms_monotonic(const struct timespec *ts) {
+    return (long long)ts->tv_sec * 1000 + ts->tv_nsec / 1000000;
+}
+
+int set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1) return -1;
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 int connect_port(int port) {
     int sock;
     struct sockaddr_in addr;
-
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         perror("socket");
-        exit(1);
+        return -1;
     }
-
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    inet_pton(AF_INET, SERVER_ADDR, &addr.sin_addr);
+    if (inet_pton(AF_INET, SERVER_ADDR, &addr.sin_addr) != 1) {
+        perror("inet_pton");
+        close(sock);
+        return -1;
+    }
 
     if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         perror("connect");
-        exit(1);
+        close(sock);
+        return -1;
     }
 
-    set_nonblocking(sock);
+    if (set_nonblocking(sock) < 0) {
+        perror("set_nonblocking");
+    }
     return sock;
 }
 
-int main() {
-    int sock1 = connect_port(PORT1);
-    int sock2 = connect_port(PORT2);
-    int sock3 = connect_port(PORT3);
+pthread_mutex_t state_mtx = PTHREAD_MUTEX_INITIALIZER;
+char last_val[3][BUF_SIZE];
+long long last_recv_monotonic[3];
 
-    char buf1[BUF_SIZE] = "--", buf2[BUF_SIZE] = "--", buf3[BUF_SIZE] = "--";
-    char tmp[BUF_SIZE];
-    ssize_t n;
-    fd_set readfds;
-    int maxfd = sock1;
-    if (sock2 > maxfd) maxfd = sock2;
-    if (sock3 > maxfd) maxfd = sock3;
+// socket fds
+int sfd[3];
 
-    struct timeval timeout;
-    long long last_print = current_timestamp_ms();
+// Reader thread: monitors sockets and updates last_val and last_recv_monotonic
+void *reader_thread(void *arg) {
+    (void)arg;
+    fd_set rfds;
+    int maxfd = sfd[0];
+    if (sfd[1] > maxfd) maxfd = sfd[1];
+    if (sfd[2] > maxfd) maxfd = sfd[2];
 
-    while (1) {
-        // small timeout for responsiveness
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 10000; // 10ms
+    char rbuf[BUF_SIZE];
 
-        FD_ZERO(&readfds);
-        FD_SET(sock1, &readfds);
-        FD_SET(sock2, &readfds);
-        FD_SET(sock3, &readfds);
+    char partial[3][BUF_SIZE];
+    memset(partial, 0, sizeof(partial));
 
-        int ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
+    while (running) {
+        FD_ZERO(&rfds);
+        for (int i = 0; i < 3; ++i) FD_SET(sfd[i], &rfds);
+
+
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 50000;
+
+        int ready = select(maxfd + 1, &rfds, NULL, NULL, &tv);
         if (ready < 0) {
+            if (errno == EINTR) continue;
             perror("select");
             break;
         }
+        if (ready == 0) continue;
 
-        // read available data
-        if (FD_ISSET(sock1, &readfds)) {
-            n = read(sock1, tmp, sizeof(tmp) - 1);
+        for (int i = 0; i < 3; ++i) {
+            if (!FD_ISSET(sfd[i], &rfds)) continue;
+            ssize_t n = read(sfd[i], rbuf, sizeof(rbuf) - 1);
             if (n > 0) {
-                tmp[n] = '\0';
-                char *nl = strchr(tmp, '\n');
-                if (nl) *nl = '\0';
-                strncpy(buf1, tmp, sizeof(buf1) - 1);
-            }
-        }
-        if (FD_ISSET(sock2, &readfds)) {
-            n = read(sock2, tmp, sizeof(tmp) - 1);
-            if (n > 0) {
-                tmp[n] = '\0';
-                char *nl = strchr(tmp, '\n');
-                if (nl) *nl = '\0';
-                strncpy(buf2, tmp, sizeof(buf2) - 1);
-            }
-        }
-        if (FD_ISSET(sock3, &readfds)) {
-            n = read(sock3, tmp, sizeof(tmp) - 1);
-            if (n > 0) {
-                tmp[n] = '\0';
-                char *nl = strchr(tmp, '\n');
-                if (nl) *nl = '\0';
-                strncpy(buf3, tmp, sizeof(buf3) - 1);
-            }
-        }
+                rbuf[n] = '\0';
+                
+                strncat(partial[i], rbuf, sizeof(partial[i]) - strlen(partial[i]) - 1);
 
-        // check if it's time to print
-        long long now = current_timestamp_ms();
-        if (now - last_print >= PRINT_INTERVAL_MS) {
-            printf("{\"timestamp\": %lld, \"out1\": \"%s\", \"out2\": \"%s\", \"out3\": \"%s\"}\n",
-                   now, buf1, buf2, buf3);
-            fflush(stdout);
-            last_print = now;
+                char *line = NULL;
+                char *search = partial[i];
+                char *last_line_start = NULL;
+                for (;;) {
+                    char *nl = strchr(search, '\n');
+                    if (!nl) break;
+                    *nl = '\0';
+                    last_line_start = search;
+                    search = nl + 1;
+                }
+                if (last_line_start) {
+                    // last_line_start points to start of last full line in partial[i]
+                    // copy it into last_val under lock
+                    struct timespec now;
+                    clock_gettime(CLOCK_MONOTONIC, &now);
+                    long long now_ms = timespec_to_ms_monotonic(&now);
+
+                    pthread_mutex_lock(&state_mtx);
+
+                    char *start = last_line_start;
+                    while (*start && (*start == '\r' || *start == '\n' || *start == ' ' || *start == '\t')) start++;
+                    char *end = start + strlen(start) - 1;
+                    while (end > start && (*end == '\r' || *end == '\n' || *end == ' ' || *end == '\t')) { *end = '\0'; end--; }
+                    strncpy(last_val[i], start, BUF_SIZE - 1);
+                    last_val[i][BUF_SIZE - 1] = '\0';
+                    last_recv_monotonic[i] = now_ms;
+                    pthread_mutex_unlock(&state_mtx);
+
+                    // remove processed part from partial: everything up to 'search' remains
+                    if (*search) {
+                        memmove(partial[i], search, strlen(search) + 1);
+                    } else {
+                        partial[i][0] = '\0';
+                    }
+                } else {
+                    // no newline yet - keep partial as is (but cap length)
+                    if (strlen(partial[i]) > BUF_SIZE - 2) partial[i][BUF_SIZE - 1] = '\0';
+                }
+            } else if (n == 0) {
+                usleep(10000);
+            } else {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // nothing to read
+                    continue;
+                } else if (errno == EINTR) {
+                    continue;
+                } else {
+                    usleep(10000);
+                }
+            }
         }
     }
 
-    close(sock1);
-    close(sock2);
-    close(sock3);
+    return NULL;
+}
+
+// Printer thread: sleeps until each absolute 100ms tick and prints JSON.
+// Uses CLOCK_MONOTONIC for sleeping, CLOCK_REALTIME for timestamp field.
+void *printer_thread(void *arg) {
+    (void)arg;
+    struct timespec now_mon, next_mon;
+    clock_gettime(CLOCK_MONOTONIC, &now_mon);
+
+    // Align next_mon to next 100 ms tick
+    long long now_ms = timespec_to_ms_monotonic(&now_mon);
+    long long ticks = now_ms / INTERVAL_MS;
+    long long next_tick_ms = (ticks + 1) * INTERVAL_MS;
+    next_mon.tv_sec = next_tick_ms / 1000;
+    next_mon.tv_nsec = (next_tick_ms % 1000) * 1000000;
+
+    while (running) {
+        // sleep until next_mon (absolute)
+        int rc;
+        do {
+            rc = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next_mon, NULL);
+        } while (rc == EINTR && running);
+        if (!running) break;
+
+        struct timespec wake_mon, wake_real;
+        clock_gettime(CLOCK_MONOTONIC, &wake_mon);
+        clock_gettime(CLOCK_REALTIME, &wake_real);
+        long long wake_mon_ms = timespec_to_ms_monotonic(&wake_mon);
+        long long timestamp_epoch_ms = timespec_to_ms_epoch(&wake_real);
+
+        // decide each out value: if last_recv_monotonic within [next_mon - INTERVAL_MS, next_mon) ??? 
+        // As spec: "If no value is received from a server port within a given 100ms period, the value for that port should be \"--\"."
+        // We'll consider 'within the last INTERVAL_MS' relative to this tick.
+        char out1[BUF_SIZE], out2[BUF_SIZE], out3[BUF_SIZE];
+        pthread_mutex_lock(&state_mtx);
+        for (int i = 0; i < 3; ++i) {
+            long long recv = last_recv_monotonic[i]; // monotonic ms when last value arrived
+            if (recv != 0 && (wake_mon_ms - recv) <= INTERVAL_MS) {
+                // value arrived within last 100 ms
+                if (i == 0) strncpy(out1, last_val[i], BUF_SIZE - 1);
+                if (i == 1) strncpy(out2, last_val[i], BUF_SIZE - 1);
+                if (i == 2) strncpy(out3, last_val[i], BUF_SIZE - 1);
+            } else {
+                if (i == 0) strncpy(out1, "--", BUF_SIZE - 1);
+                if (i == 1) strncpy(out2, "--", BUF_SIZE - 1);
+                if (i == 2) strncpy(out3, "--", BUF_SIZE - 1);
+            }
+        }
+        pthread_mutex_unlock(&state_mtx);
+
+        out1[BUF_SIZE - 1] = '\0';
+        out2[BUF_SIZE - 1] = '\0';
+        out3[BUF_SIZE - 1] = '\0';
+
+        printf("{\"timestamp\": %lld, \"out1\": \"%s\", \"out2\": \"%s\", \"out3\": \"%s\"}\n",
+               timestamp_epoch_ms, out1, out2, out3);
+        fflush(stdout);
+
+        // advance next_mon by INTERVAL_MS
+        long long next_ms = next_mon.tv_sec * 1000LL + next_mon.tv_nsec / 1000000LL + INTERVAL_MS;
+        next_mon.tv_sec = next_ms / 1000;
+        next_mon.tv_nsec = (next_ms % 1000) * 1000000;
+    }
+
+    return NULL;
+}
+
+int main(void) {
+    signal(SIGINT, handle_sigint);
+
+    sfd[0] = connect_port(PORT1);
+    sfd[1] = connect_port(PORT2);
+    sfd[2] = connect_port(PORT3);
+    if (sfd[0] < 0 || sfd[1] < 0 || sfd[2] < 0) {
+        fprintf(stderr, "Failed to connect to all ports\n");
+        return 1;
+    }
+
+    pthread_mutex_lock(&state_mtx);
+    for (int i = 0; i < 3; ++i) {
+        strncpy(last_val[i], "--", BUF_SIZE - 1);
+        last_val[i][BUF_SIZE - 1] = '\0';
+        last_recv_monotonic[i] = 0;
+    }
+    pthread_mutex_unlock(&state_mtx);
+
+    pthread_t rthr, pthr;
+    if (pthread_create(&rthr, NULL, reader_thread, NULL) != 0) {
+        perror("pthread_create reader");
+        return 1;
+    }
+    if (pthread_create(&pthr, NULL, printer_thread, NULL) != 0) {
+        perror("pthread_create printer");
+        running = 0;
+        pthread_join(rthr, NULL);
+        return 1;
+    }
+
+    while (running) {
+        sleep(1);
+    }
+
+    pthread_cancel(rthr);
+    pthread_cancel(pthr);
+    pthread_join(rthr, NULL);
+    pthread_join(pthr, NULL);
+
+    for (int i = 0; i < 3; ++i) close(sfd[i]);
     return 0;
 }
