@@ -1,12 +1,4 @@
-// client1.c
-// Embedded Linux Homework - Task 1
-//
-// Reads data from TCP ports 4001, 4002, 4003 on localhost
-// Prints a JSON line every 100 ms with timestamp and latest received values
-//
-// Compile with:  gcc client1.c -o client1
-//
-
+// client1.c (fixed timing version)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,21 +17,19 @@
 #define PORT2 4002
 #define PORT3 4003
 #define BUF_SIZE 256
+#define PRINT_INTERVAL_MS 100
 
-// helper: current time in ms since epoch
 long long current_timestamp_ms() {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    return (long long)(tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
+    return (long long)tv.tv_sec * 1000 + (tv.tv_usec / 1000);
 }
 
-// helper: set socket non-blocking
 void set_nonblocking(int sock) {
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK);
 }
 
-// connect to localhost:port, return socket fd
 int connect_port(int port) {
     int sock;
     struct sockaddr_in addr;
@@ -78,35 +68,34 @@ int main() {
     if (sock3 > maxfd) maxfd = sock3;
 
     struct timeval timeout;
+    long long last_print = current_timestamp_ms();
 
     while (1) {
-        // prepare for select()
+        // small timeout for responsiveness
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 10000; // 10ms
+
         FD_ZERO(&readfds);
         FD_SET(sock1, &readfds);
         FD_SET(sock2, &readfds);
         FD_SET(sock3, &readfds);
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 100000; // 100 ms
 
         int ready = select(maxfd + 1, &readfds, NULL, NULL, &timeout);
-
         if (ready < 0) {
             perror("select");
             break;
         }
 
-        // check each socket
+        // read available data
         if (FD_ISSET(sock1, &readfds)) {
             n = read(sock1, tmp, sizeof(tmp) - 1);
             if (n > 0) {
                 tmp[n] = '\0';
-                // store last line (strip newline if any)
                 char *nl = strchr(tmp, '\n');
                 if (nl) *nl = '\0';
                 strncpy(buf1, tmp, sizeof(buf1) - 1);
             }
         }
-
         if (FD_ISSET(sock2, &readfds)) {
             n = read(sock2, tmp, sizeof(tmp) - 1);
             if (n > 0) {
@@ -116,7 +105,6 @@ int main() {
                 strncpy(buf2, tmp, sizeof(buf2) - 1);
             }
         }
-
         if (FD_ISSET(sock3, &readfds)) {
             n = read(sock3, tmp, sizeof(tmp) - 1);
             if (n > 0) {
@@ -127,12 +115,14 @@ int main() {
             }
         }
 
-        long long ts = current_timestamp_ms();
-
-        // print JSON line
-        printf("{\"timestamp\": %lld, \"out1\": \"%s\", \"out2\": \"%s\", \"out3\": \"%s\"}\n",
-               ts, buf1, buf2, buf3);
-        fflush(stdout);
+        // check if it's time to print
+        long long now = current_timestamp_ms();
+        if (now - last_print >= PRINT_INTERVAL_MS) {
+            printf("{\"timestamp\": %lld, \"out1\": \"%s\", \"out2\": \"%s\", \"out3\": \"%s\"}\n",
+                   now, buf1, buf2, buf3);
+            fflush(stdout);
+            last_print = now;
+        }
     }
 
     close(sock1);
