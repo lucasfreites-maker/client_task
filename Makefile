@@ -1,14 +1,19 @@
 CC       := gcc
 CFLAGS   := -O2 -Wall -Wextra -pedantic -std=c11 -pthread
-TARGET   := client1
-SRC      := client1.c
+
+TARGETS  := client1 client2
+SRC1     := client1.c
+SRC2     := client2.c
 
 .PHONY: all clean
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SRC)
+client1: $(SRC1)
+	$(CC) $(CFLAGS) -o $@ $^
+
+client2: $(SRC2)
 	$(CC) $(CFLAGS) -o $@ $^
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)
