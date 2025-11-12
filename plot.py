@@ -1,40 +1,38 @@
-import socket
-import threading
-import matplotlib.pyplot as plt
-from collections import deque
 import json
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
 
-ports = [4001, 4002, 4003]
+filename = "data.txt"
+interpolate_missing = True
 
-buffers = {p: deque(maxlen=200) for p in ports}
+# Reading from file with data extracted from client2
+with open(filename, "r") as f:
+    lines = [json.loads(line) for line in f if line.strip()]
 
-def read_from_port(port):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect(("127.0.0.1", port))
-    print(f"✅ Connected to port {port}")
-    while True:
-        data = sock.recv(1024)
-        if not data:
-            break
-        try:
-            msg = data.decode().strip()
-            val = float(msg)
-            buffers[port].append(val)
-        except:
-            pass
+df = pd.DataFrame(lines)
+df["time_s"] = (df["timestamp"] - df["timestamp"].iloc[0]) / 1000.0
 
-# A thread for each tcp port
-for p in ports:
-    threading.Thread(target=read_from_port, args=(p,), daemon=True).start()
+for col in ["out1", "out2", "out3"]:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-plt.ion()
-fig, ax = plt.subplots()
-lines = [ax.plot([], [], label=f"out{i+1}")[0] for i in range(3)]
-ax.legend()
+# Interpolate missing data for smoother lines
+if interpolate_missing:
+    df[["out1", "out2", "out3"]] = df[["out1", "out2", "out3"]].interpolate()
 
-while True:
-    for i, port in enumerate(ports):
-        lines[i].set_data(range(len(buffers[port])), list(buffers[port]))
-    ax.relim()
-    ax.autoscale_view()
-    plt.pause(0.1)
+plt.figure(figsize=(12, 6))
+colors = ["tab:blue", "tab:orange", "tab:green"]
+
+for i, col in enumerate(["out1", "out2", "out3"]):
+    if df[col].notna().any():
+        plt.plot(df["time_s"], df[col], label=col, color=colors[i], lw=1.5)
+
+plt.title("Signals from data.txt")
+plt.xlabel("Time [s]")
+plt.ylabel("Amplitude")
+plt.legend()
+plt.grid(True)
+plt.ylim(-8, 8)
+plt.yticks(np.arange(-8, 9, 1))
+plt.tight_layout()
+plt.show()
