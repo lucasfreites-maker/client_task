@@ -279,11 +279,13 @@ void *printer_thread(void *arg) {
                 if (current_state == 1) {
                     // Transition: crossed above or equal to 3.0
                     //write_parameter(1, 255, 8000);
-                    write_parameter(1, 255, 2000);
+                    write_parameter(1, 255, 1000);
+                    write_parameter(1, 170, 8000);
                 } else {
                     // Transition: dropped below 3.0
                     //write_parameter(1, 255, 4000);
-                    write_parameter(1, 255, 1000);
+                    write_parameter(1, 255, 2000);
+                    write_parameter(1, 170, 4000);
                 }
                 last_state = current_state;
             }
